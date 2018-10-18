@@ -395,7 +395,7 @@ KLINES_CONFIG={
                 '1day': "D1"
             },
             'volume_key': {
-                'bar_time': lambda x: (mk_stamp1(x['timestamp'].replace('T', ' ')[:-5]) + 8 * 3600) * 1000,
+                'bar_time': lambda x: (mk_stamp(x['timestamp'].replace('T', ' ')[:-5]) + 8 * 3600) * 1000,
                 'open': 'open',
                 'close': 'close',
                 'high': 'max',
@@ -630,7 +630,7 @@ TICKERS_CONFIG={
                 'highest_price': lambda x: x['high'] if x['high'] else 0,
                 'lowest_price': lambda x: x['low'] if x['low'] else 0,
                 'increase': lambda x: (float(x['last']) - float(x['open'])) / float(x['open']) if x['open'] else 0,
-                'timestamp': lambda x: mk_stamp1(x['timestamp'].replace('T', ' ')[:-5]) * 1000,
+                'timestamp': lambda x: mk_stamp(x['timestamp'].replace('T', ' ')[:-5]) * 1000,
             },
             'currencies': ['eth', 'eur'],
         },
@@ -712,11 +712,3 @@ def mk_stamp(dt):
     return timestamp
 
 
-def mk_stamp1(dt):
-    """convert to timestamp"""
-    if len(dt) < 16:
-        timeArr = time.strptime(dt, "%Y-%m-%d %H:%M")
-    else:
-        timeArr = time.strptime(dt, "%Y-%m-%d %H:%M:%S")
-    timestamp = int(time.mktime(timeArr))
-    return timestamp

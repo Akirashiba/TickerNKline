@@ -30,7 +30,7 @@ async_timeout = aiohttp.ClientTimeout(total=600)
 timeout = 60
 OS_TYPE = platform.system().upper()
 CURRENCY_ALIAS = {
-    'usd': ['usd', 'usdt', 'zusd'],
+    'usd': ['usd', 'usdt', 'zusd', 'usdc'],
     'cny': ['bnc'],
     'btc': ['btc', 'xbt', 'xxbt']
 }
@@ -63,8 +63,8 @@ class Ticker(object):
         for key, value in self.exchange_config.items():
             setattr(self, key, value)
 
-        client = MongoClient(MONGO_CLIENT)
-        self.db = client["Tickers"]
+        #client = MongoClient(MONGO_CLIENT)
+        #self.db = client["Tickers"]
         self.sr = StrictRedis(connection_pool=ConnectionPool.from_url(REDIS_CLIENT))
   
         self.datas = self.get_coinpair()
@@ -75,7 +75,8 @@ class Ticker(object):
             self.id_symbol = {self.market_format(_info["pair_name"]): _info["pair_name"] for _info in self.datas}
         else:
             self.id_symbol = {_info["pair_api_name"]: _info["pair_name"] for _info in self.datas}
-
+        
+        self.id_coinpairid = {_info["pair_api_name"]: _info["coinpair_id"] for _info in self.datas}
         self.currencies += BASE_CURRENCIES
         for currency in self.currencies:
             to_cny = float(self.sr.hget('rate:rmb', currency) or '1')
@@ -166,14 +167,18 @@ class Ticker(object):
                 market_id = item.pop("symbol")
                 if market_id in self.id_symbol:
                     symbol = self.id_symbol[market_id]
+                    item["coinpair_id"] = self.id_coinpairid[market_id]
                 elif market_id.upper() in self.id_symbol:
                     symbol = self.id_symbol[market_id.upper()]
+                    item["coinpair_id"] = self.id_coinpairid[market_id.upper()]
                 elif market_id.lower() in self.id_symbol:
                     symbol = self.id_symbol[market_id.lower()]
+                    item["coinpair_id"] = self.id_coinpairid[market_id.lower()]
                 else:
                     self.logging.exception("MarketId: {} Not Found".format(market_id))
                     self.error_count += 1
                     continue
+                item["coinpair"] = symbol
                 kname = 'Market_{}_{}'.format(self.name, symbol.replace("/", "_"))
 
                 if "CNY_price" not in item:
@@ -181,11 +186,11 @@ class Ticker(object):
                     item = self.update_item(item, quote)
 
                 # 保存数据
-                # try:
-                #     self.sr.hmset(kname, item)
-                #     self.db[kname].insert_one(item)
-                # except Exception as sub_err:
-                #     self.logging.exception('[Ticker {} Saving Error]: {}'.foramt(kname, sub_err))
+                try:
+                    self.sr.hmset(kname, item)
+                    #self.db[kname].insert_one(item)
+                except Exception as sub_err:
+                    self.logging.exception('[Ticker {} Saving Error]: {}'.format(kname, sub_err))
 
                 self.success_count += 1
 
@@ -214,11 +219,13 @@ class Ticker(object):
 
     def update_item(self, item, quote):
         if quote in self.currencies or self.deep_contain(CURRENCY_ALIAS, quote):
-            to_cny = getattr(self, quote)
+            to_cny = getattr(self, quote) if hasattr(self, quote) else None
             usd_to_cny = getattr(self, "usd")
             btc_to_cny = getattr(self, "btc")
             temp = {}
             if quote in CURRENCY_ALIAS['cny']:
+                if not to_cny:
+                    to_cny = getattr(self, 'cny')
                 temp["CNY_price"] = item['price']
                 temp["USD_price"] = float(item['price']) / usd_to_cny
                 temp["BTC_price"] = float(item['price']) / btc_to_cny
@@ -226,6 +233,8 @@ class Ticker(object):
                 temp['CNY_lowest_price'] = item['lowest_price']
 
             elif quote in CURRENCY_ALIAS['usd']:
+                if not to_cny:
+                    to_cny = getattr(self, 'usd')
                 temp["CNY_price"] = float(item['price']) * usd_to_cny
                 temp["USD_price"] = item['price']
                 temp["BTC_price"] = float(item['price']) * (usd_to_cny / btc_to_cny)
@@ -233,6 +242,8 @@ class Ticker(object):
                 temp['CNY_lowest_price'] = float(item['lowest_price']) * usd_to_cny
 
             elif quote in CURRENCY_ALIAS['btc']:
+                if not to_cny:
+                    to_cny = getattr(self, 'btc')
                 temp["CNY_price"] = float(item['price']) * btc_to_cny
                 temp["USD_price"] = float(item['price']) * (btc_to_cny / usd_to_cny)
                 temp["BTC_price"] = item['price']
@@ -297,7 +308,7 @@ class AsyncTicker(Ticker):
                 session._connector = None
         self.sessions = []
 
-    async def fetch(self, session, url, kname, headers=None, data=None, params=None):
+    async def fetch(self, session, url, kname, coinpair_id, headers=None, data=None, params=None):
         try:
             session_method = getattr(session, self.method.lower())
             async with await session_method(url, timeout=async_timeout, ssl=False, data=data, params=params, headers=headers) as response:
@@ -312,7 +323,7 @@ class AsyncTicker(Ticker):
                 if self.name == "ZB":
                     pattern = re.search(r'{.*}', text)
                     text = pattern.group()
-                self.parse_data(kname, json.loads(text))
+                self.parse_data(kname, coinpair_id, json.loads(text))
 
         except asyncio.TimeoutError:
             self.logging.error("Timeout with {} {} Timeout, Total_time: {}"
@@ -329,7 +340,7 @@ class AsyncTicker(Ticker):
             self.logging.exception('{} with {} {} Exception:{}'.format(self.name, self.method.upper(), params_url(url, params), str(e)))
             self.error_count += 1
 
-    def parse_data(self, kname, crude_data):
+    def parse_data(self, kname, coinpair_id, crude_data):
         try:
             # 提取数据
             if hasattr(self, "get_data"):
@@ -344,6 +355,9 @@ class AsyncTicker(Ticker):
                     item[k] = _vk(processed_data)
                 else:
                     item[k] = processed_data[_vk]
+            
+            item["coinpair"] = "/".join(kname.split("_")[-2:])
+            item["coinpair_id"] = coinpair_id
 
             if "timestamp" not in self.volume_key:
                 item['timestamp'] = milliseconds()
@@ -353,11 +367,11 @@ class AsyncTicker(Ticker):
                 item = self.update_item(item, quote)
 
             # 保存数据
-            # try:
-            #     self.sr.hmset(kname, item)
-            #     self.db[kname].insert_one(item)
-            # except Exception as sub_err:
-            #     self.logging.exception('[Ticker {} Saving Error]: {}'.foramt(kname, sub_err))
+            try:
+                self.sr.hmset(kname, item)
+                #self.db[kname].insert_one(item)
+            except Exception as sub_err:
+                self.logging.exception('[Ticker {} Saving Error]: {}'.format(kname, sub_err))
             self.success_count += 1
 
         except Exception as err:
@@ -371,6 +385,7 @@ class AsyncTicker(Ticker):
             _market = data['pair_name']
             _market_id = data['pair_api_name']
             _market = _market.replace("/", "_")
+            coinpair_id = self.id_coinpairid[_market_id]            
 
             _config = self.params_fill(copy.deepcopy(self.ticker_config), _market_id)
             _url = _config['url']
@@ -382,7 +397,7 @@ class AsyncTicker(Ticker):
                     fetch_kwargs[_property] = _config[_property]
 
             kname = "Market_{}_{}".format(self.name, _market)
-            tasks.append(self.fetch(self.clients[i % len(self.clients)], _url, kname, **fetch_kwargs))
+            tasks.append(self.fetch(self.clients[i % len(self.clients)], _url, kname, coinpair_id, **fetch_kwargs))
 
         loop = asyncio.get_event_loop()
         if OS_TYPE != 'WINDOWS':
